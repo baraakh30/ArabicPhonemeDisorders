@@ -30,9 +30,9 @@ SAMPLE_RATE = 16000
 CLASSES = ['Deletion', 'Distortion', 'Normal', 'Substitution_gh', 'Substitution_l']
 NUM_CLASSES = len(CLASSES)
 
-# Feature extraction functions using torchaudio
-def extract_features(file_path, n_mfcc=40, n_fft=2048, hop_length=512, n_mels=128):
-    """Extract multiple features from audio file using torchaudio for faster processing"""
+# More robust feature extraction with better normalization
+def extract_features(file_path, n_mfcc=13, n_fft=1024, hop_length=256, n_mels=64):
+    """Extract multiple features from audio file with better parameter tuning"""
     try:
         # Load audio file with torchaudio
         waveform, sample_rate = torchaudio.load(file_path)
@@ -51,32 +51,30 @@ def extract_features(file_path, n_mfcc=40, n_fft=2048, hop_length=512, n_mels=12
             waveform = waveform.unsqueeze(0)
             
         # Pre-emphasize (high-pass filter)
-        # Approximate librosa's preemphasis with a simple filter
         waveform_emphasized = torch.cat([waveform[:, :1], waveform[:, 1:] - 0.97 * waveform[:, :-1]], dim=1)
         
         # Pad or truncate to fixed length (1 second)
         target_length = SAMPLE_RATE
         if waveform_emphasized.shape[1] < target_length:
-            # Pad
             padding = target_length - waveform_emphasized.shape[1]
             waveform_fixed = torch.nn.functional.pad(waveform_emphasized, (0, padding))
         else:
-            # Truncate
             waveform_fixed = waveform_emphasized[:, :target_length]
             
-        # Extract MFCC - simplified parameters to avoid dimension issues
+        # Reduced feature dimensions to prevent overfitting
+        # Extract MFCC with fewer coefficients
         mfcc_transform = T.MFCC(
             sample_rate=SAMPLE_RATE,
-            n_mfcc=n_mfcc,
+            n_mfcc=n_mfcc,  # Reduced from 40 to 13
             melkwargs={
-                'n_fft': n_fft,
-                'hop_length': hop_length,
-                'n_mels': n_mels
+                'n_fft': n_fft,     # Reduced from 2048 to 1024
+                'hop_length': hop_length,  # Reduced from 512 to 256
+                'n_mels': n_mels    # Reduced from 128 to 64
             }
         )
         mfccs = mfcc_transform(waveform_fixed)
         
-        # Extract Mel spectrogram
+        # Extract Mel spectrogram with reduced dimensions
         mel_transform = T.MelSpectrogram(
             sample_rate=SAMPLE_RATE,
             n_fft=n_fft,
@@ -84,46 +82,82 @@ def extract_features(file_path, n_mfcc=40, n_fft=2048, hop_length=512, n_mels=12
             n_mels=n_mels
         )
         mel_spectrogram = mel_transform(waveform_fixed)
-        mel_spectrogram = torch.log(mel_spectrogram + 1e-9)  # Log-Mel spectrogram
+        mel_spectrogram = torch.log(mel_spectrogram + 1e-9)
         
         # Convert to numpy arrays
         mfccs_np = mfccs.squeeze(0).cpu().numpy()
         mel_np = mel_spectrogram.squeeze(0).cpu().numpy()
         
-        # Ensure all features have the same second dimension
-        target_width = 32  # Fixed width for all features
+        # Better feature size management
+        target_width = 63  # Better aligned with audio processing
         
-        # Resize features if needed
-        if mfccs_np.shape[1] != target_width:
-            mfccs_resized = np.zeros((mfccs_np.shape[0], target_width))
-            width = min(mfccs_np.shape[1], target_width)
-            mfccs_resized[:, :width] = mfccs_np[:, :width]
-            mfccs_np = mfccs_resized
-            
-        if mel_np.shape[1] != target_width:
-            mel_resized = np.zeros((mel_np.shape[0], target_width))
-            width = min(mel_np.shape[1], target_width)
-            mel_resized[:, :width] = mel_np[:, :width]
-            mel_np = mel_resized
+        # Resize features using interpolation for better quality
+        def resize_feature(feature, target_width):
+            if feature.shape[1] == target_width:
+                return feature
+            elif feature.shape[1] > target_width:
+                # Downsample using averaging
+                step = feature.shape[1] / target_width
+                indices = np.arange(0, feature.shape[1], step).astype(int)[:target_width]
+                return feature[:, indices]
+            else:
+                # Zero-pad
+                padding = target_width - feature.shape[1]
+                return np.pad(feature, ((0, 0), (0, padding)), mode='constant')
         
-        # Create a fixed-size zero crossing rate feature
-        zcr_np = np.zeros((1, target_width))
+        mfccs_np = resize_feature(mfccs_np, target_width)
+        mel_np = resize_feature(mel_np, target_width)
         
-        # Combine features
-        features = np.vstack([mfccs_np, mel_np, zcr_np])
+        # Only use most relevant features to reduce overfitting
+        # Combine features with reduced dimensionality
+        features = np.vstack([mfccs_np, mel_np[:32, :]])  # Use only first 32 mel bands
         
-        # Normalize features
+        #  Better normalization - per-feature standardization
         features = (features - np.mean(features, axis=1, keepdims=True)) / (np.std(features, axis=1, keepdims=True) + 1e-8)
         
         return features
     
     except Exception as e:
         print(f"Error extracting features from {file_path}: {str(e)}")
-        # Return a dummy feature array instead of None to avoid TypeError
-        dummy_features = np.zeros((169, 32))  # Match expected dimensions (40 mfcc + 128 mel + 1 zcr)
+        # Return appropriate dummy features
+        dummy_features = np.zeros((45, 63))  # 13 mfcc + 32 mel features
         return dummy_features
 
-# Dataset class
+# Enhanced data augmentation with more realistic transformations
+class AudioAugmentation(object):
+    def __init__(self, p=0.5):
+        self.p = p
+        
+    def __call__(self, features):
+        if np.random.random() > self.p:
+            return features
+            
+        # More conservative augmentation to prevent overfitting
+        aug_type = np.random.choice(['noise', 'time_shift', 'freq_mask', 'none'], p=[0.3, 0.3, 0.3, 0.1])
+        
+        if aug_type == 'noise':
+            # Reduced noise level
+            noise = torch.randn_like(features) * 0.02  # Reduced from 0.05
+            return features + noise
+        elif aug_type == 'time_shift':
+            # Time shifting instead of masking
+            shift = np.random.randint(-5, 6)
+            if shift > 0:
+                features = torch.cat([features[:, shift:], torch.zeros_like(features[:, :shift])], dim=1)
+            elif shift < 0:
+                features = torch.cat([torch.zeros_like(features[:, :abs(shift)]), features[:, :shift]], dim=1)
+            return features
+        elif aug_type == 'freq_mask':
+            # More conservative frequency masking
+            freq_dim = features.shape[0]
+            mask_len = max(1, int(freq_dim * 0.1))  # Reduced from 0.2
+            mask_start = np.random.randint(0, max(1, freq_dim - mask_len))
+            features[mask_start:mask_start+mask_len, :] = 0
+            return features
+        else:
+            return features
+
+# Dataset class (same as original but updated for new feature dimensions)
 class ArabicRDisorderDataset(Dataset):
     def __init__(self, data_dir, mode='train', transform=None, cache_features=True):
         self.data_dir = data_dir
@@ -170,8 +204,7 @@ class ArabicRDisorderDataset(Dataset):
         
         # Ensure features is not None
         if features is None:
-            # Use a dummy feature array if extraction failed
-            features = np.zeros((169, 32))  # Match expected dimensions
+            features = np.zeros((45, 63))  # Updated dimensions
         
         # Convert to tensor
         features = torch.FloatTensor(features)
@@ -182,77 +215,72 @@ class ArabicRDisorderDataset(Dataset):
         
         return features, label
 
-# Attention mechanism
+# Simplified attention mechanism to reduce overfitting
 class AttentionLayer(nn.Module):
     def __init__(self, input_dim):
         super(AttentionLayer, self).__init__()
+        # Simplified attention with fewer parameters
         self.attention = nn.Sequential(
-            nn.Linear(input_dim, 128),
+            nn.Linear(input_dim, 64),  # Reduced from 128
             nn.Tanh(),
-            nn.Linear(128, 1),
+            nn.Dropout(0.3),  # Added dropout
+            nn.Linear(64, 1),
             nn.Softmax(dim=1)
         )
         
     def forward(self, x):
-        # x shape: (batch, time, features)
         batch_size, time_steps, features = x.size()
         
-        # Reshape for attention calculation
-        x_reshaped = x.reshape(-1, features)  # (batch*time, features)
+        x_reshaped = x.reshape(-1, features)
+        attention_weights = self.attention(x_reshaped)
+        attention_weights = attention_weights.reshape(batch_size, time_steps, 1)
         
-        # Calculate attention weights
-        attention_weights = self.attention(x_reshaped)  # (batch*time, 1)
-        attention_weights = attention_weights.reshape(batch_size, time_steps, 1)  # (batch, time, 1)
-        
-        # Apply attention weights
-        attended = x * attention_weights  # (batch, time, features)
-        
-        # Sum over time dimension
-        context = torch.sum(attended, dim=1)  # (batch, features)
+        attended = x * attention_weights
+        context = torch.sum(attended, dim=1)
         
         return context, attention_weights
 
-# CNN-LSTM model with attention
+# Significantly reduced model complexity to combat overfitting
 class CNNLSTMAttention(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_classes, num_layers=2, dropout=0.5):
+    def __init__(self, input_dim, hidden_dim, num_classes, num_layers=1, dropout=0.6):
         super(CNNLSTMAttention, self).__init__()
         
-        # CNN layers
-        self.conv1 = nn.Conv1d(input_dim, 64, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(64)
-        self.conv2 = nn.Conv1d(64, 128, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(128)
-        self.conv3 = nn.Conv1d(128, 256, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm1d(256)
+        # Reduced CNN complexity
+        self.conv1 = nn.Conv1d(input_dim, 32, kernel_size=3, padding=1)  # Reduced from 64
+        self.bn1 = nn.BatchNorm1d(32)
+        self.dropout1 = nn.Dropout(0.4)
+        
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=3, padding=1)  # Reduced from 128
+        self.bn2 = nn.BatchNorm1d(64)
+        self.dropout2 = nn.Dropout(0.5)
+        
+        # Removed third conv layer to reduce complexity
+        
         self.pool = nn.MaxPool1d(kernel_size=2)
         
-        # LSTM layers
-        self.lstm = nn.LSTM(256, hidden_dim, num_layers=num_layers, 
-                           batch_first=True, bidirectional=True, dropout=dropout if num_layers > 1 else 0)
+        # Reduced LSTM complexity
+        self.lstm = nn.LSTM(64, hidden_dim//2, num_layers=num_layers,  # Reduced hidden_dim
+                           batch_first=True, bidirectional=True, dropout=0 if num_layers == 1 else dropout)
         
         # Attention layer
-        self.attention = AttentionLayer(hidden_dim * 2)  # *2 for bidirectional
+        self.attention = AttentionLayer(hidden_dim)  # hidden_dim because of bidirectional
         
-        # Output layer
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes)
-        )
+        #Simplified output layer with more dropout
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim//2)
+        self.dropout3 = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden_dim//2, num_classes)
         
     def forward(self, x):
-        # x shape: (batch, features, time)
-        
         # CNN layers
         x = F.relu(self.bn1(self.conv1(x)))
-        x = self.pool(x)
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = self.pool(x)
-        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.dropout1(x)
         x = self.pool(x)
         
-        # Reshape for LSTM: (batch, time, features)
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.dropout2(x)
+        x = self.pool(x)
+        
+        # Reshape for LSTM
         x = x.permute(0, 2, 1)
         
         # LSTM layers
@@ -262,69 +290,112 @@ class CNNLSTMAttention(nn.Module):
         x, attention_weights = self.attention(x)
         
         # Output layer
-        x = self.fc(x)
+        x = F.relu(self.fc1(x))
+        x = self.dropout3(x)
+        x = self.fc2(x)
         
         return x, attention_weights
 
-# Training function for all epochs
-def train_model(model, train_loader, criterion, optimizer, scheduler, device, num_epochs):
+# Enhanced early stopping with more conservative parameters
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=0.001, verbose=False):  # Reduced patience
+        self.patience = patience
+        self.min_delta = min_delta
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = float('inf')
+        
+    def __call__(self, val_loss, model):
+        score = -val_loss
+        
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model)
+        elif score < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model)
+            self.counter = 0
+            
+    def save_checkpoint(self, val_loss, model):
+        if self.verbose:
+            print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}). Saving model...')
+        torch.save(model.state_dict(), 'best_model.pth')
+        self.val_loss_min = val_loss
+
+# Training function with  regularization
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, num_epochs):
     model.train()
     train_losses = []
     train_accs = []
+    val_losses = []
+    val_accs = []
     
-    # Start training loop
+    early_stopping = EarlyStopping(patience=5, verbose=True, min_delta=0.001)
+    
     for epoch in range(num_epochs):
         running_loss = 0.0
         correct = 0
         total = 0
         
-        # Process all batches in this epoch
+        # Training phase
+        model.train()
         for inputs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
             inputs = inputs.to(device)
             labels = labels.to(device)
             
-            # Zero the parameter gradients
             optimizer.zero_grad()
             
-            # Forward pass
             outputs, _ = model(inputs)
-            # Convert labels to long type to fix potential "nll_loss_forward_reduce_cuda_kernel_2d_index" error
             labels = labels.long()
             loss = criterion(outputs, labels)
             
-            # Backward pass and optimize
             loss.backward()
+            # More aggressive gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             
-            # Statistics
             running_loss += loss.item() * inputs.size(0)
             _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
         
-        # Calculate epoch statistics
         epoch_loss = running_loss / total
         epoch_acc = correct / total
         train_losses.append(epoch_loss)
         train_accs.append(epoch_acc)
         
-        # Update learning rate
-        scheduler.step(epoch_loss)
+        # Validation phase
+        val_loss, val_acc, _, _ = evaluate(model, val_loader, criterion, device)
+        val_losses.append(val_loss)
+        val_accs.append(val_acc)
         
-        # Print statistics
+        # Update learning rate
+        scheduler.step(val_loss)
+        
         print(f"Epoch {epoch+1}/{num_epochs}")
         print(f"Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.4f}")
+        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        print(f"Gap: {abs(epoch_acc - val_acc):.4f}")  # Monitor overfitting gap
         
-        # Save model at regular intervals
-        if (epoch + 1) % 10 == 0 or epoch == num_epochs - 1:
-            torch.save(model.state_dict(), f'cnn_lstm_model_epoch_{epoch+1}.pth')
-            print(f"Model checkpoint saved at epoch {epoch+1}")
+        # Check early stopping
+        early_stopping(val_loss, model)
+        if early_stopping.early_stop:
+            print("Early stopping triggered")
+            break
     
-    # Save final model
-    torch.save(model.state_dict(), 'final_cnn_lstm_model.pth')
-    print("Final model saved")
+    # Load best model
+    model.load_state_dict(torch.load('best_model.pth'))
+    print("Loaded best model from early stopping")
     
-    return train_losses, train_accs
+    return train_losses, train_accs, val_losses, val_accs
 
 # Evaluation function
 def evaluate(model, dataloader, criterion, device):
@@ -340,13 +411,10 @@ def evaluate(model, dataloader, criterion, device):
             inputs = inputs.to(device)
             labels = labels.to(device)
             
-            # Forward pass
             outputs, _ = model(inputs)
-            # Convert labels to long type to fix potential "nll_loss_forward_reduce_cuda_kernel_2d_index" error
             labels = labels.long()
             loss = criterion(outputs, labels)
             
-            # Statistics
             running_loss += loss.item() * inputs.size(0)
             _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
@@ -360,43 +428,44 @@ def evaluate(model, dataloader, criterion, device):
     
     return epoch_loss, epoch_acc, all_preds, all_labels
 
-# Main function
 def main():
-    # Print device information once at the beginning
     print(f"Using device: {device}")
     
     # Data directories
     train_dir = 'Train'
     test_dir = 'Test'
     
-    # Create datasets
-    train_dataset = ArabicRDisorderDataset(train_dir, mode='train')
+    train_transform = AudioAugmentation(p=0.4) 
+    train_dataset = ArabicRDisorderDataset(train_dir, mode='train', transform=train_transform)
     test_dataset = ArabicRDisorderDataset(test_dir, mode='test')
     
-    # Create dataloaders
-    batch_size = 32
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    train_size = int(0.75 * len(train_dataset))  
+    val_size = len(train_dataset) - train_size
+    train_subset, val_subset = torch.utils.data.random_split(
+        train_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
     
-    # Get input dimensions from the first sample
+    batch_size = 16 
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    
+    # Get input dimensions
     sample_features, _ = train_dataset[0]
-    input_dim = sample_features.shape[0]  # Number of features
+    input_dim = sample_features.shape[0]
     
-    # Create model
-    hidden_dim = 128
-    model = CNNLSTMAttention(input_dim, hidden_dim, NUM_CLASSES)
+    hidden_dim = 64  
+    model = CNNLSTMAttention(input_dim, hidden_dim, NUM_CLASSES, dropout=0.6)
     model = model.to(device)
     
-    # Loss function and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)  # Added label smoothing
+    optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-3)  # Reduced LR, increased weight decay
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=3, verbose=True)
     
-    # Training parameters
-    num_epochs = 20
+    num_epochs = 60
     
-    # Train the model (all epochs at once)
-    train_losses, train_accs = train_model(model, train_loader, criterion, optimizer, scheduler, device, num_epochs)
+    # Train the model
+    train_losses, train_accs, val_losses, val_accs = train_model(
+        model, train_loader, val_loader, criterion, optimizer, scheduler, device, num_epochs)
     
     # Final evaluation
     test_loss, test_acc, test_preds, test_labels = evaluate(model, test_loader, criterion, device)
@@ -415,24 +484,42 @@ def main():
     plt.title('Confusion Matrix')
     plt.savefig('confusion_matrix.png')
     
-    # Plot training history
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    plt.plot(train_losses, label='Train')
-    plt.title('Training Loss')
+    # Plot training history with overfitting indicators
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(1, 3, 1)
+    plt.plot(train_losses, label='Train', linewidth=2)
+    plt.plot(val_losses, label='Validation', linewidth=2)
+    plt.title('Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     
-    plt.subplot(1, 2, 2)
-    plt.plot(train_accs, label='Train')
-    plt.title('Training Accuracy')
+    plt.subplot(1, 3, 2)
+    plt.plot(train_accs, label='Train', linewidth=2)
+    plt.plot(val_accs, label='Validation', linewidth=2)
+    plt.title('Accuracy')
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # overfitting gap plot
+    plt.subplot(1, 3, 3)
+    gap = [abs(t - v) for t, v in zip(train_accs, val_accs)]
+    plt.plot(gap, label='Train-Val Gap', linewidth=2, color='red')
+    plt.title('Overfitting Gap')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy Gap')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('cnn_lstm_training_history.png')
+    plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
     
     print(f"Final test accuracy: {test_acc:.4f}")
+    print(f"Final overfitting gap: {abs(train_accs[-1] - val_accs[-1]):.4f}")
 
 if __name__ == "__main__":
-    main() 
+    main()
