@@ -14,6 +14,10 @@ from sklearn.metrics import confusion_matrix, classification_report, accuracy_sc
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
 import warnings
+import time
+import psutil
+import gc
+from datetime import datetime
 warnings.filterwarnings('ignore')
 
 # Set random seeds for reproducibility
@@ -338,9 +342,24 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     val_losses = []
     val_accs = []
     
-    early_stopping = EarlyStopping(patience=5, verbose=True, min_delta=0.001)
+    early_stopping = EarlyStopping(patience=10, verbose=True, min_delta=0.001)
+    
+    # Initialize time and memory tracking
+    start_time = time.time()
+    process = psutil.Process(os.getpid())
+    initial_memory = process.memory_info().rss / 1024 / 1024  # Convert to MB
+    
+    # Track GPU memory if available
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        initial_gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024  # Convert to MB
+        initial_gpu_memory_reserved = torch.cuda.memory_reserved() / 1024 / 1024  # Convert to MB
+    else:
+        initial_gpu_memory = 0
+        initial_gpu_memory_reserved = 0
     
     for epoch in range(num_epochs):
+        epoch_start_time = time.time()
         running_loss = 0.0
         correct = 0
         total = 0
@@ -380,10 +399,30 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         # Update learning rate
         scheduler.step(val_loss)
         
+        # Calculate epoch time
+        epoch_time = time.time() - epoch_start_time
+        current_memory = process.memory_info().rss / 1024 / 1024  # Convert to MB
+        memory_used = current_memory - initial_memory
+        
+        # Track GPU memory if available
+        if torch.cuda.is_available():
+            current_gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024  # MB
+            current_gpu_memory_reserved = torch.cuda.memory_reserved() / 1024 / 1024  # MB
+            peak_gpu_memory = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
+        else:
+            current_gpu_memory = 0
+            current_gpu_memory_reserved = 0
+            peak_gpu_memory = 0
+        
         print(f"Epoch {epoch+1}/{num_epochs}")
         print(f"Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.4f}")
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
         print(f"Gap: {abs(epoch_acc - val_acc):.4f}")  # Monitor overfitting gap
+        print(f"Epoch Time: {epoch_time:.2f} seconds")
+        print(f"Current Memory Usage: {current_memory:.2f} MB (Increase: {memory_used:.2f} MB)")
+        if torch.cuda.is_available():
+            print(f"GPU Memory: {current_gpu_memory:.2f} MB allocated, {current_gpu_memory_reserved:.2f} MB reserved")
+            print(f"Peak GPU Memory: {peak_gpu_memory:.2f} MB")
         
         # Check early stopping
         early_stopping(val_loss, model)
@@ -395,7 +434,41 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     model.load_state_dict(torch.load('best_model.pth'))
     print("Loaded best model from early stopping")
     
-    return train_losses, train_accs, val_losses, val_accs
+    # Calculate total training time
+    total_time = time.time() - start_time
+    final_memory = process.memory_info().rss / 1024 / 1024  # Convert to MB
+    total_memory_increase = final_memory - initial_memory
+    
+    # Final GPU memory stats
+    if torch.cuda.is_available():
+        final_gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024  # MB
+        final_gpu_memory_reserved = torch.cuda.memory_reserved() / 1024 / 1024  # MB
+        peak_gpu_memory = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
+        gpu_memory_increase = final_gpu_memory - initial_gpu_memory
+    else:
+        final_gpu_memory = 0
+        final_gpu_memory_reserved = 0
+        peak_gpu_memory = 0
+        gpu_memory_increase = 0
+    
+    # Log training metrics
+    training_metrics = {
+        "total_training_time": total_time,
+        "epochs_completed": epoch + 1,
+        "average_epoch_time": total_time / (epoch + 1),
+        "initial_memory_usage_mb": initial_memory,
+        "final_memory_usage_mb": final_memory,
+        "memory_increase_mb": total_memory_increase,
+        "initial_gpu_memory_mb": initial_gpu_memory,
+        "final_gpu_memory_mb": final_gpu_memory,
+        "gpu_memory_increase_mb": gpu_memory_increase,
+        "peak_gpu_memory_mb": peak_gpu_memory,
+        "gpu_memory_reserved_mb": final_gpu_memory_reserved,
+        "final_train_accuracy": train_accs[-1],
+        "final_val_accuracy": val_accs[-1]
+    }
+    
+    return train_losses, train_accs, val_losses, val_accs, training_metrics
 
 # Evaluation function
 def evaluate(model, dataloader, criterion, device):
@@ -431,6 +504,12 @@ def evaluate(model, dataloader, criterion, device):
 def main():
     print(f"Using device: {device}")
     
+    # Print GPU information if available
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"GPU Memory: {gpu_memory:.1f} GB")
+    
     # Data directories
     train_dir = 'Train'
     test_dir = 'Test'
@@ -438,15 +517,9 @@ def main():
     train_transform = AudioAugmentation(p=0.4) 
     train_dataset = ArabicRDisorderDataset(train_dir, mode='train', transform=train_transform)
     test_dataset = ArabicRDisorderDataset(test_dir, mode='test')
-    
-    train_size = int(0.75 * len(train_dataset))  
-    val_size = len(train_dataset) - train_size
-    train_subset, val_subset = torch.utils.data.random_split(
-        train_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
-    
+
     batch_size = 16 
-    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
     
     # Get input dimensions
@@ -459,13 +532,13 @@ def main():
     
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)  # Added label smoothing
     optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-3)  # Reduced LR, increased weight decay
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=3, verbose=True)
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
     
-    num_epochs = 60
+    num_epochs = 100
     
     # Train the model
-    train_losses, train_accs, val_losses, val_accs = train_model(
-        model, train_loader, val_loader, criterion, optimizer, scheduler, device, num_epochs)
+    train_losses, train_accs, val_losses, val_accs, training_metrics = train_model(
+        model, train_loader, test_loader, criterion, optimizer, scheduler, device, num_epochs)
     
     # Final evaluation
     test_loss, test_acc, test_preds, test_labels = evaluate(model, test_loader, criterion, device)
@@ -520,6 +593,56 @@ def main():
     
     print(f"Final test accuracy: {test_acc:.4f}")
     print(f"Final overfitting gap: {abs(train_accs[-1] - val_accs[-1]):.4f}")
+    
+    # Save training metrics to a text file
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    with open(f'arabic_r_disorder_model_metrics_{timestamp}.txt', 'w') as f:
+        f.write("=== Arabic R-Disorder Classifier Training Metrics ===\n")
+        f.write(f"Date and Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        f.write("=== Hardware Information ===\n")
+        f.write(f"Device: {device}\n")
+        if torch.cuda.is_available():
+            f.write(f"GPU: {torch.cuda.get_device_name(0)}\n")
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            f.write(f"Total GPU Memory: {gpu_memory:.1f} GB\n\n")
+        else:
+            f.write("GPU: Not available\n\n")
+        
+        f.write("=== Training Time ===\n")
+        f.write(f"Total Training Time: {training_metrics['total_training_time']:.2f} seconds ({training_metrics['total_training_time']/60:.2f} minutes)\n")
+        f.write(f"Epochs Completed: {training_metrics['epochs_completed']}\n")
+        f.write(f"Average Time per Epoch: {training_metrics['average_epoch_time']:.2f} seconds\n\n")
+        
+        f.write("=== Memory Usage ===\n")
+        f.write(f"Initial Memory Usage: {training_metrics['initial_memory_usage_mb']:.2f} MB\n")
+        f.write(f"Final Memory Usage: {training_metrics['final_memory_usage_mb']:.2f} MB\n")
+        f.write(f"Memory Increase: {training_metrics['memory_increase_mb']:.2f} MB\n\n")
+        
+        f.write("=== GPU Memory Usage ===\n")
+        f.write(f"Initial GPU Memory Usage: {training_metrics['initial_gpu_memory_mb']:.2f} MB\n")
+        f.write(f"Final GPU Memory Usage: {training_metrics['final_gpu_memory_mb']:.2f} MB\n")
+        f.write(f"GPU Memory Increase: {training_metrics['gpu_memory_increase_mb']:.2f} MB\n")
+        f.write(f"Peak GPU Memory Usage: {training_metrics['peak_gpu_memory_mb']:.2f} MB\n")
+        f.write(f"GPU Memory Reserved: {training_metrics['gpu_memory_reserved_mb']:.2f} MB\n\n")
+        
+        f.write("=== Model Performance ===\n")
+        f.write(f"Final Training Accuracy: {training_metrics['final_train_accuracy']:.4f}\n")
+        f.write(f"Final Validation Accuracy: {training_metrics['final_val_accuracy']:.4f}\n")
+        f.write(f"Final Test Accuracy: {test_acc:.4f}\n")
+        f.write(f"Overfitting Gap: {abs(train_accs[-1] - val_accs[-1]):.4f}\n\n")
+        
+        f.write("=== Model Architecture ===\n")
+        f.write(f"Input Dimension: {input_dim}\n")
+        f.write(f"Hidden Dimension: {hidden_dim}\n")
+        f.write(f"Number of Classes: {NUM_CLASSES}\n")
+        f.write(f"Total Parameters: {sum(p.numel() for p in model.parameters()):,}\n")
+        f.write(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}\n\n")
+        
+        f.write("=== Classification Report ===\n")
+        f.write(classification_report(test_labels, test_preds, target_names=CLASSES))
+    
+    print(f"Training metrics saved to 'arabic_r_disorder_model_metrics_{timestamp}.txt'")
 
 if __name__ == "__main__":
     main()

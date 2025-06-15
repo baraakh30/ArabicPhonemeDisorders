@@ -1,0 +1,50 @@
+=== Arabic R-Disorder Classifier Training Metrics ===
+Date and Time: 2025-06-15 03:35:55
+
+=== Hardware Information ===
+Device: cuda
+GPU: NVIDIA GeForce RTX 4090 Laptop GPU
+Total GPU Memory: 16.0 GB
+
+=== Training Time ===
+Total Training Time: 680.35 seconds (11.34 minutes)
+Epochs Completed: 49
+Average Time per Epoch: 13.88 seconds
+
+=== Memory Usage ===
+Initial Memory Usage: 739.66 MB
+Final Memory Usage: 1416.10 MB
+Memory Increase: 676.44 MB
+
+=== GPU Memory Usage ===
+Initial GPU Memory Usage: 0.17 MB
+Final GPU Memory Usage: 17.05 MB
+GPU Memory Increase: 16.88 MB
+Peak GPU Memory Usage: 36.75 MB
+GPU Memory Reserved: 40.00 MB
+
+=== Model Performance ===
+Final Training Accuracy: 0.9164
+Final Validation Accuracy: 0.8575
+Final Test Accuracy: 0.8750
+Overfitting Gap: 0.0589
+
+=== Model Architecture ===
+Input Dimension: 45
+Hidden Dimension: 64
+Number of Classes: 5
+Total Parameters: 42,310
+Trainable Parameters: 42,310
+
+=== Classification Report ===
+                 precision    recall  f1-score   support
+
+       Deletion       1.00      1.00      1.00        80
+     Distortion       0.99      0.99      0.99        80
+         Normal       0.84      0.61      0.71        80
+Substitution_gh       0.68      0.86      0.76        80
+ Substitution_l       0.91      0.91      0.91        80
+
+       accuracy                           0.88       400
+      macro avg       0.88      0.88      0.87       400
+   weighted avg       0.88      0.88      0.87       400

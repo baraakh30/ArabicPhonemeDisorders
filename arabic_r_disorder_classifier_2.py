@@ -14,6 +14,10 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import warnings
+import time
+import psutil
+import gc
+from datetime import datetime
 warnings.filterwarnings('ignore')
 
 # Set random seeds for reproducibility
@@ -296,10 +300,27 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0
     
     best_val_acc = 0.0
     train_losses = []
+    train_accuracies = []
+    val_losses = []
     val_accuracies = []
+    
+    # Initialize time and memory tracking
+    start_time = time.time()
+    process = psutil.Process(os.getpid())
+    initial_memory = process.memory_info().rss / 1024 / 1024  # Convert to MB
+    
+    # Track GPU memory if available
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        initial_gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024  # Convert to MB
+        initial_gpu_memory_reserved = torch.cuda.memory_reserved() / 1024 / 1024  # Convert to MB
+    else:
+        initial_gpu_memory = 0
+        initial_gpu_memory_reserved = 0
     
     for epoch in range(num_epochs):
         # Training phase
+        epoch_start_time = time.time()
         model.train()
         train_loss = 0.0
         train_correct = 0
@@ -331,6 +352,7 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0
         
         # Validation phase
         model.eval()
+        val_loss = 0.0
         val_correct = 0
         val_total = 0
         val_predictions = []
@@ -340,6 +362,8 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0
             for data, target in val_loader:
                 data, target = data.to(device), target.to(device)
                 output = model(data)
+                loss = criterion(output, target)
+                val_loss += loss.item()
                 _, predicted = torch.max(output.data, 1)
                 val_total += target.size(0)
                 val_correct += (predicted == target).sum().item()
@@ -351,14 +375,35 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0
         train_acc = 100. * train_correct / train_total
         
         train_losses.append(train_loss / len(train_loader))
+        val_losses.append(val_loss / len(val_loader))
+        train_accuracies.append(train_acc)
         val_accuracies.append(val_acc)
-        
         scheduler.step()
+        
+        # Calculate epoch time and memory usage
+        epoch_time = time.time() - epoch_start_time
+        current_memory = process.memory_info().rss / 1024 / 1024  # Convert to MB
+        memory_used = current_memory - initial_memory
+        
+        # Track GPU memory if available
+        if torch.cuda.is_available():
+            current_gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024  # MB
+            current_gpu_memory_reserved = torch.cuda.memory_reserved() / 1024 / 1024  # MB
+            peak_gpu_memory = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
+        else:
+            current_gpu_memory = 0
+            current_gpu_memory_reserved = 0
+            peak_gpu_memory = 0
         
         print(f'Epoch {epoch+1}/{num_epochs}:')
         print(f'  Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.2f}%')
-        print(f'  Val Acc: {val_acc:.2f}%')
+        print(f'  Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.2f}%')
         print(f'  Learning Rate: {scheduler.get_last_lr()[0]:.6f}')
+        print(f'  Epoch Time: {epoch_time:.2f} seconds')
+        print(f'  Current Memory Usage: {current_memory:.2f} MB (Increase: {memory_used:.2f} MB)')
+        if torch.cuda.is_available():
+            print(f'  GPU Memory: {current_gpu_memory:.2f} MB allocated, {current_gpu_memory_reserved:.2f} MB reserved')
+            print(f'  Peak GPU Memory: {peak_gpu_memory:.2f} MB')
         
         # Save best model
         if val_acc > best_val_acc:
@@ -368,7 +413,42 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0
         
         print('-' * 60)
     
-    return train_losses, val_accuracies
+    # Calculate total training time
+    total_time = time.time() - start_time
+    final_memory = process.memory_info().rss / 1024 / 1024  # Convert to MB
+    total_memory_increase = final_memory - initial_memory
+    
+    # Final GPU memory stats
+    if torch.cuda.is_available():
+        final_gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024  # MB
+        final_gpu_memory_reserved = torch.cuda.memory_reserved() / 1024 / 1024  # MB
+        peak_gpu_memory = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
+        gpu_memory_increase = final_gpu_memory - initial_gpu_memory
+    else:
+        final_gpu_memory = 0
+        final_gpu_memory_reserved = 0
+        peak_gpu_memory = 0
+        gpu_memory_increase = 0
+    
+    # Log training metrics
+    training_metrics = {
+        "total_training_time": total_time,
+        "epochs_completed": epoch + 1,
+        "average_epoch_time": total_time / (epoch + 1),
+        "initial_memory_usage_mb": initial_memory,
+        "final_memory_usage_mb": final_memory,
+        "memory_increase_mb": total_memory_increase,
+        "initial_gpu_memory_mb": initial_gpu_memory,
+        "final_gpu_memory_mb": final_gpu_memory,
+        "gpu_memory_increase_mb": gpu_memory_increase,
+        "peak_gpu_memory_mb": peak_gpu_memory,
+        "gpu_memory_reserved_mb": final_gpu_memory_reserved,
+        "final_train_accuracy": train_accuracies[-1],
+        "final_val_accuracy": val_accuracies[-1],
+        "best_val_accuracy": best_val_acc
+    }
+    
+    return train_losses, val_losses, train_accuracies, val_accuracies, training_metrics
 
 def evaluate_model(model, test_loader):
     model.eval()
@@ -404,7 +484,7 @@ def evaluate_model(model, test_loader):
     plt.xlabel('Predicted')
     plt.ylabel('Actual')
     plt.tight_layout()
-    plt.savefig('confusion_matrix.png', dpi=300, bbox_inches='tight')
+    plt.savefig('confusion_matrix_model_2.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     return test_acc, all_predictions, all_targets
@@ -447,7 +527,7 @@ def main():
     
     # Train model
     print("Starting training...")
-    train_losses, val_accuracies = train_model(model, train_loader, test_loader, 
+    train_losses, val_losses, train_accuracies, val_accuracies, training_metrics = train_model(model, train_loader, test_loader, 
                                               num_epochs=100, learning_rate=0.001)
     
     # Load best model
@@ -457,29 +537,83 @@ def main():
     print("\nFinal evaluation on test set:")
     test_acc, predictions, targets = evaluate_model(model, test_loader)
     
-    # Plot training curves
+    # Plot training history with overfitting indicators
     plt.figure(figsize=(15, 5))
     
     plt.subplot(1, 2, 1)
-    plt.plot(train_losses)
-    plt.title('Training Loss')
+    plt.plot(train_losses, label='Train', linewidth=2)
+    plt.plot(val_losses, label='Validation', linewidth=2)
+    plt.title('Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.grid(True)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     
     plt.subplot(1, 2, 2)
-    plt.plot(val_accuracies)
-    plt.title('Validation Accuracy')
+    plt.plot(train_accuracies, label='Train', linewidth=2)
+    plt.plot(val_accuracies, label='Validation', linewidth=2)
+    plt.title('Accuracy')
     plt.xlabel('Epoch')
-    plt.ylabel('Accuracy (%)')
-    plt.grid(True)
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
     
     plt.tight_layout()
-    plt.savefig('training_curves.png', dpi=300, bbox_inches='tight')
+    plt.savefig('training_history_model_2.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     print(f"\nFinal Test Accuracy: {test_acc:.2f}%")
-    print("Model saved as 'best_model.pth'")
+    print("Model saved as 'best_model_2.pth'")
+    
+    # Save training metrics to a text file
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    with open(f'model2_metrics_{timestamp}.txt', 'w') as f:
+        f.write("=== Advanced Audio Classifier (Model2) Training Metrics ===\n")
+        f.write(f"Date and Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        f.write("=== Hardware Information ===\n")
+        f.write(f"Device: {device}\n")
+        if torch.cuda.is_available():
+            f.write(f"GPU: {torch.cuda.get_device_name(0)}\n")
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            f.write(f"Total GPU Memory: {gpu_memory:.1f} GB\n\n")
+        else:
+            f.write("GPU: Not available\n\n")
+        
+        f.write("=== Training Time ===\n")
+        f.write(f"Total Training Time: {training_metrics['total_training_time']:.2f} seconds ({training_metrics['total_training_time']/60:.2f} minutes)\n")
+        f.write(f"Epochs Completed: {training_metrics['epochs_completed']}\n")
+        f.write(f"Average Time per Epoch: {training_metrics['average_epoch_time']:.2f} seconds\n\n")
+        
+        f.write("=== Memory Usage ===\n")
+        f.write(f"Initial Memory Usage: {training_metrics['initial_memory_usage_mb']:.2f} MB\n")
+        f.write(f"Final Memory Usage: {training_metrics['final_memory_usage_mb']:.2f} MB\n")
+        f.write(f"Memory Increase: {training_metrics['memory_increase_mb']:.2f} MB\n\n")
+        
+        f.write("=== GPU Memory Usage ===\n")
+        f.write(f"Initial GPU Memory Usage: {training_metrics['initial_gpu_memory_mb']:.2f} MB\n")
+        f.write(f"Final GPU Memory Usage: {training_metrics['final_gpu_memory_mb']:.2f} MB\n")
+        f.write(f"GPU Memory Increase: {training_metrics['gpu_memory_increase_mb']:.2f} MB\n")
+        f.write(f"Peak GPU Memory Usage: {training_metrics['peak_gpu_memory_mb']:.2f} MB\n")
+        f.write(f"GPU Memory Reserved: {training_metrics['gpu_memory_reserved_mb']:.2f} MB\n\n")
+        
+        f.write("=== Model Performance ===\n")
+        f.write(f"Final Training Accuracy: {training_metrics['final_train_accuracy']:.2f}%\n")
+        f.write(f"Final Validation Accuracy: {training_metrics['final_val_accuracy']:.2f}%\n")
+        f.write(f"Best Validation Accuracy: {training_metrics['best_val_accuracy']:.2f}%\n")
+        f.write(f"Final Test Accuracy: {test_acc:.2f}%\n\n")
+        
+        f.write("=== Model Architecture ===\n")
+        f.write(f"Model Type: AdvancedAudioClassifier\n")
+        f.write(f"Number of Classes: {len(class_names)}\n")
+        f.write(f"Total Parameters: {total_params:,}\n")
+        f.write(f"Trainable Parameters: {trainable_params:,}\n\n")
+        
+        f.write("=== Classification Report ===\n")
+        f.write(classification_report(targets, predictions, target_names=class_names))
+    
+    print(f"Training metrics saved to 'arabic_r_disorder_classifier_2_metrics_{timestamp}.txt'")
 
 if __name__ == "__main__":
     main()
