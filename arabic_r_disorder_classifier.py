@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -65,20 +66,19 @@ def extract_features(file_path, n_mfcc=13, n_fft=1024, hop_length=256, n_mels=64
         else:
             waveform_fixed = waveform_emphasized[:, :target_length]
             
-        # Reduced feature dimensions to prevent overfitting
         # Extract MFCC with fewer coefficients
         mfcc_transform = T.MFCC(
             sample_rate=SAMPLE_RATE,
-            n_mfcc=n_mfcc,  # Reduced from 40 to 13
+            n_mfcc=n_mfcc, 
             melkwargs={
-                'n_fft': n_fft,     # Reduced from 2048 to 1024
-                'hop_length': hop_length,  # Reduced from 512 to 256
-                'n_mels': n_mels    # Reduced from 128 to 64
+                'n_fft': n_fft,     
+                'hop_length': hop_length, 
+                'n_mels': n_mels  
             }
         )
         mfccs = mfcc_transform(waveform_fixed)
         
-        # Extract Mel spectrogram with reduced dimensions
+        # Extract Mel spectrogram   
         mel_transform = T.MelSpectrogram(
             sample_rate=SAMPLE_RATE,
             n_fft=n_fft,
@@ -113,7 +113,7 @@ def extract_features(file_path, n_mfcc=13, n_fft=1024, hop_length=256, n_mels=64
         mel_np = resize_feature(mel_np, target_width)
         
         # Only use most relevant features to reduce overfitting
-        # Combine features with reduced dimensionality
+        # Combine features 
         features = np.vstack([mfccs_np, mel_np[:32, :]])  # Use only first 32 mel bands
         
         #  Better normalization - per-feature standardization
@@ -127,7 +127,7 @@ def extract_features(file_path, n_mfcc=13, n_fft=1024, hop_length=256, n_mels=64
         dummy_features = np.zeros((45, 63))  # 13 mfcc + 32 mel features
         return dummy_features
 
-# Enhanced data augmentation with more realistic transformations
+#  data augmentation with more realistic transformations
 class AudioAugmentation(object):
     def __init__(self, p=0.5):
         self.p = p
@@ -140,8 +140,8 @@ class AudioAugmentation(object):
         aug_type = np.random.choice(['noise', 'time_shift', 'freq_mask', 'none'], p=[0.3, 0.3, 0.3, 0.1])
         
         if aug_type == 'noise':
-            # Reduced noise level
-            noise = torch.randn_like(features) * 0.02  # Reduced from 0.05
+            # added noise level
+            noise = torch.randn_like(features) * 0.02 
             return features + noise
         elif aug_type == 'time_shift':
             # Time shifting instead of masking
@@ -154,7 +154,7 @@ class AudioAugmentation(object):
         elif aug_type == 'freq_mask':
             # More conservative frequency masking
             freq_dim = features.shape[0]
-            mask_len = max(1, int(freq_dim * 0.1))  # Reduced from 0.2
+            mask_len = max(1, int(freq_dim * 0.1)) 
             mask_start = np.random.randint(0, max(1, freq_dim - mask_len))
             features[mask_start:mask_start+mask_len, :] = 0
             return features
@@ -184,7 +184,10 @@ class ArabicRDisorderDataset(Dataset):
         
         # Convert labels to numpy array of type int64 (long)
         self.labels = np.array(self.labels, dtype=np.int64)
-        
+        len_files = len(self.files)
+        if len_files == 0:
+            print(f"No files found in {data_dir} for {mode} set")
+            sys.exit(1)
         print(f"Loaded {len(self.files)} files for {mode} set")
         print(f"Class distribution: {np.bincount(self.labels)}")
     
@@ -225,7 +228,7 @@ class AttentionLayer(nn.Module):
         super(AttentionLayer, self).__init__()
         # Simplified attention with fewer parameters
         self.attention = nn.Sequential(
-            nn.Linear(input_dim, 64),  # Reduced from 128
+            nn.Linear(input_dim, 64), 
             nn.Tanh(),
             nn.Dropout(0.3),  # Added dropout
             nn.Linear(64, 1),
@@ -244,30 +247,25 @@ class AttentionLayer(nn.Module):
         
         return context, attention_weights
 
-# Significantly reduced model complexity to combat overfitting
 class CNNLSTMAttention(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_classes, num_layers=1, dropout=0.6):
         super(CNNLSTMAttention, self).__init__()
         
-        # Reduced CNN complexity
-        self.conv1 = nn.Conv1d(input_dim, 32, kernel_size=3, padding=1)  # Reduced from 64
+        self.conv1 = nn.Conv1d(input_dim, 32, kernel_size=3, padding=1) 
         self.bn1 = nn.BatchNorm1d(32)
         self.dropout1 = nn.Dropout(0.4)
         
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=3, padding=1)  # Reduced from 128
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=3, padding=1) 
         self.bn2 = nn.BatchNorm1d(64)
         self.dropout2 = nn.Dropout(0.5)
         
-        # Removed third conv layer to reduce complexity
-        
         self.pool = nn.MaxPool1d(kernel_size=2)
         
-        # Reduced LSTM complexity
-        self.lstm = nn.LSTM(64, hidden_dim//2, num_layers=num_layers,  # Reduced hidden_dim
+        self.lstm = nn.LSTM(64, hidden_dim//2, num_layers=num_layers, 
                            batch_first=True, bidirectional=True, dropout=0 if num_layers == 1 else dropout)
         
         # Attention layer
-        self.attention = AttentionLayer(hidden_dim)  # hidden_dim because of bidirectional
+        self.attention = AttentionLayer(hidden_dim) 
         
         #Simplified output layer with more dropout
         self.fc1 = nn.Linear(hidden_dim, hidden_dim//2)
@@ -300,9 +298,9 @@ class CNNLSTMAttention(nn.Module):
         
         return x, attention_weights
 
-# Enhanced early stopping with more conservative parameters
+#  early stopping with more conservative parameters
 class EarlyStopping:
-    def __init__(self, patience=5, min_delta=0.001, verbose=False):  # Reduced patience
+    def __init__(self, patience=5, min_delta=0.001, verbose=False):  
         self.patience = patience
         self.min_delta = min_delta
         self.verbose = verbose
@@ -531,7 +529,7 @@ def main():
     model = model.to(device)
     
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)  # Added label smoothing
-    optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-3)  # Reduced LR, increased weight decay
+    optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-3) 
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
     
     num_epochs = 100
